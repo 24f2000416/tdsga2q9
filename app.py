@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from typing import Optional
 import uuid
 import time
@@ -7,33 +8,32 @@ import base64
 
 app = FastAPI()
 
-# -----------------------------
-# Enable CORS
-# -----------------------------
+# -------------------------------------------------
+# CORS
+# -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------------
+# -------------------------------------------------
 # ASSIGNED VALUES
-# -----------------------------
+# -------------------------------------------------
 TOTAL_ORDERS = 46
 RATE_LIMIT = 16
 WINDOW = 10  # seconds
 
-# -----------------------------
-# In-memory stores
-# -----------------------------
+# -------------------------------------------------
+# STORAGE
+# -------------------------------------------------
 idempotency_store = {}
 client_requests = {}
 
-# -----------------------------
-# Fixed catalog
-# -----------------------------
+# -------------------------------------------------
+# FIXED ORDERS
+# -------------------------------------------------
 orders = [
     {
         "id": i,
@@ -42,23 +42,29 @@ orders = [
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
-# -----------------------------
-# Cursor helpers
-# -----------------------------
+# -------------------------------------------------
+# CURSOR HELPERS
+# -------------------------------------------------
 def encode_cursor(index: int):
     return base64.b64encode(str(index).encode()).decode()
+
 
 def decode_cursor(cursor: str):
     try:
         return int(base64.b64decode(cursor).decode())
-    except:
+    except Exception:
         return 0
 
-# -----------------------------
-# Rate Limiter
-# -----------------------------
+
+# -------------------------------------------------
+# RATE LIMIT MIDDLEWARE
+# -------------------------------------------------
 @app.middleware("http")
-async def rate_limit(request, call_next):
+async def rate_limit(request: Request, call_next):
+
+    # Let browser preflight pass
+    if request.method == "OPTIONS":
+        return await call_next(request)
 
     client = request.headers.get("X-Client-Id", "anonymous")
 
@@ -70,14 +76,14 @@ async def rate_limit(request, call_next):
 
     if len(history) >= RATE_LIMIT:
 
-        retry = WINDOW - (now - history[0])
+        retry = max(1, int(WINDOW - (now - history[0])))
 
         return Response(
+            content="Rate limit exceeded",
             status_code=429,
             headers={
-                "Retry-After": str(int(retry) + 1)
+                "Retry-After": str(retry)
             },
-            content="Rate limit exceeded"
         )
 
     history.append(now)
@@ -88,10 +94,11 @@ async def rate_limit(request, call_next):
 
     return response
 
-# -----------------------------
-# Idempotent POST
-# -----------------------------
-@app.post("/orders", status_code=201)
+
+# -------------------------------------------------
+# IDEMPOTENT POST
+# -------------------------------------------------
+@app.post("/orders")
 def create_order(
     idempotency_key: Optional[str] = Header(default=None)
 ):
@@ -103,7 +110,11 @@ def create_order(
         )
 
     if idempotency_key in idempotency_store:
-        return idempotency_store[idempotency_key]
+
+        return JSONResponse(
+            status_code=201,
+            content=idempotency_store[idempotency_key]
+        )
 
     order = {
         "id": str(uuid.uuid4())
@@ -111,16 +122,23 @@ def create_order(
 
     idempotency_store[idempotency_key] = order
 
-    return order
+    return JSONResponse(
+        status_code=201,
+        content=order
+    )
 
-# -----------------------------
-# Pagination
-# -----------------------------
+
+# -------------------------------------------------
+# CURSOR PAGINATION
+# -------------------------------------------------
 @app.get("/orders")
 def list_orders(
     limit: int = 10,
     cursor: Optional[str] = None
 ):
+
+    if limit < 1:
+        limit = 1
 
     start = 0
 
